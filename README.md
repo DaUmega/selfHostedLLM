@@ -1,4 +1,4 @@
-# Ollama UI
+# Self Hosted LLM
 
 A self-hosted LLM chatbot with a modern web interface powered by [Ollama](https://ollama.ai), using docker.
 
