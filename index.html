@@ -415,6 +415,18 @@ const API = 'http://localhost:11434';
 let history = [];
 let controller = null;
 let currentModel = '';
+let conversationId = generateConversationId();
+
+function generateConversationId() {
+  return `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+function logHistoryState(context) {
+  console.log(`[${context}] History length: ${history.length}, Conv ID: ${conversationId}`);
+  if (history.length > 0) {
+    console.log('Messages in context:', history.map(m => `${m.role}(${(m.content || '').substring(0, 30)}...)`).join(' → '));
+  }
+}
 
 function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -550,13 +562,32 @@ function autoResize() {
 
 function clearChat() {
   if (controller) controller.abort();
-  history = [];
+  
+  // Completely reset history
+  history.length = 0;  // Alternative clear method as redundant safety
+  history = [];        // Also reset the reference
+  
+  // Generate new conversation ID to ensure isolation
+  conversationId = generateConversationId();
+  
+  // Clean DOM - more thorough cleanup
   msgsEl.innerHTML = '';
+  if (msgsEl.childNodes.length > 0) {
+    while (msgsEl.firstChild) {
+      msgsEl.removeChild(msgsEl.firstChild);
+    }
+  }
+  
   showEmpty();
   inputEl.value = '';
   inputEl.style.height = 'auto';
   sendBtn.disabled = false;
   stopBtn.classList.remove('visible');
+  
+  logHistoryState('Chat cleared');
+  
+  // Visual feedback that chat was cleared
+  setStatus('ready', 'ok');
 }
 
 async function loadModels() {
@@ -609,15 +640,26 @@ async function sendMessage() {
   const contentEl = assistantDiv.querySelector('.content');
   scrollBottom();
 
+  logHistoryState('Before API call');
+
   controller = new AbortController();
   let fullText = '';
 
   try {
+    const payload = {
+      model: currentModel,
+      messages: history,
+      stream: true
+    };
+    
+    console.log(`[${conversationId}] Sending ${history.length} messages to API:`, 
+      history.map(m => `${m.role}: ${(m.content || '').substring(0, 40)}...`));
+    
     const res = await fetch(`${API}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: controller.signal,
-      body: JSON.stringify({ model: currentModel, messages: history, stream: true })
+      body: JSON.stringify(payload)
     });
 
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -644,6 +686,7 @@ async function sendMessage() {
 
     contentEl.innerHTML = renderMarkdown(fullText);
     history.push({ role: 'assistant', content: fullText });
+    logHistoryState('After API response');
 
   } catch(e) {
     if (e.name === 'AbortError') {
