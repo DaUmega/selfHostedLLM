@@ -181,7 +181,7 @@ cmd_import() {
     #   4. ollama create <name> -f Modelfile
     #
     # Usage:
-    #   ./manage.sh import hf.co/llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF:Q8_0
+    #   ./manage.sh import hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q6_k
     #   ./manage.sh import hf.co/user/repo:tag  [local-name]
     #   ./manage.sh import /path/to/local.gguf  [local-name]
 
