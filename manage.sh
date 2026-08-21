@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# manage.sh — ollama-ui container manager
+# ollama-ui container manager
 # Usage: ./manage.sh <command> [args]
 set -euo pipefail
 
@@ -9,7 +9,7 @@ VOLUME="ollama-models"          # persists /root/.ollama across rebuilds
 UI_PORT="${UI_PORT:-8080}"
 API_PORT="${API_PORT:-11434}"
 
-# GPU flag — auto-detected; override with GPU=0 ./manage.sh start
+# GPU flag - auto-detected; override with GPU=0 ./manage.sh start
 GPU="${GPU:-auto}"
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -80,14 +80,14 @@ cmd_start() {
         $(gpu_flags) \
         "$IMAGE"
 
-    bold "Container logs (live — waiting for API on :${API_PORT})..."
+    bold "Container logs (live - waiting for API on :${API_PORT})..."
     dim  "────────────────────────────────────────"
 
     # Stream container logs so you can see exactly what is happening
     docker logs -f "$CONTAINER" &
     LOGS_PID=$!
 
-    # Poll host-side mapped port using bash built-in /dev/tcp — no curl/wget on host needed
+    # Poll host-side mapped port using bash built-in /dev/tcp - no curl/wget on host needed
     local tries=0 ready=0
     while [[ $tries -lt 60 ]]; do
         # ollama CLI is always present and talks to the local API
@@ -103,7 +103,7 @@ cmd_start() {
     dim  "────────────────────────────────────────"
 
     if [[ $ready -eq 0 ]]; then
-        red "API did not become ready after 60s — run: ./manage.sh logs"
+        red "API did not become ready after 60s - run: ./manage.sh logs"
         exit 1
     fi
 
@@ -178,18 +178,11 @@ cmd_remove() {
 }
 
 cmd_import() {
-    # Import a model — either a HuggingFace/registry ref, or a local GGUF file.
+    # Import a model - either a HuggingFace/registry ref, or a local GGUF file.
     #
     # Registry ref (hf.co/... or a normal ollama model ref):
     #   `ollama pull` does the download itself, including its own resume/
-    #   digest-verification logic. We only ever act on its exit code — if it
-    #   fails or is interrupted (lost connection, Ctrl+C, etc.) we abort and
-    #   import NOTHING. There is no "best effort" partial import: a half
-    #   finished download is not a model.
-    #
-    #   If you want a friendlier local name than the ref, we alias it with
-    #   `ollama cp`, which just points a new name at the same verified
-    #   blobs — no manual blob-hunting involved.
+    #   digest-verification logic.
     #
     # Local .gguf file:
     #   You already have the complete file, so we register it directly via
@@ -223,17 +216,8 @@ cmd_import() {
 
     # ── Case B: HuggingFace / ollama registry ref ─────────────────────────
     bold "Pulling from registry: $src"
-    dim  "(Ctrl+C stops the download for real — nothing is imported until it's verified complete)"
+    dim  "(Ctrl+C stops the download - can be resumed later with the same command.)"
 
-    # IMPORTANT: -it allocates a real TTY so Ctrl+C reaches the remote
-    # process instead of just killing the local docker-exec client.
-    #
-    # We do NOT trust ollama's own exit code to tell us whether Ctrl+C
-    # happened: ollama appears to exit 0 on a cancelled pull (it treats
-    # SIGINT as a clean shutdown, not a failure). So we catch the signal
-    # ourselves — bash is in the same foreground process group as the
-    # terminal and receives the same Ctrl+C — and that flag always wins,
-    # regardless of what ollama reports.
     local pull_status=0
     local interrupted=0
     trap 'interrupted=1' INT TERM
@@ -243,21 +227,19 @@ cmd_import() {
     if [[ $interrupted -eq 1 ]]; then
         docker exec "$CONTAINER" pkill -f "ollama pull" >/dev/null 2>&1 || true
         red "Cancelled."
-        dim  "Nothing was imported — a half-finished download is never registered as a model."
+        dim  "Nothing was imported - a half-finished download is never registered as a model."
         die  "Re-run to retry (ollama resumes from where it left off): ./manage.sh import $src${name:+ $name}"
     fi
 
     if [[ $pull_status -ne 0 ]]; then
         red "Pull failed (exit code $pull_status)."
-        dim  "Nothing was imported — a half-finished download is never registered as a model."
+        dim  "Nothing was imported - a half-finished download is never registered as a model."
         die  "Re-run to retry (ollama resumes from where it left off): ./manage.sh import $src${name:+ $name}"
     fi
 
-    # Belt and suspenders: don't take the exit code's word for it. Confirm
-    # the model is actually present in ollama's own registry before we
-    # ever say the word "success".
+    # Confirm the model is actually present in ollama's own registry
     if ! docker exec "$CONTAINER" ollama list | grep -qF "$src"; then
-        die "Pull reported success but '$src' isn't showing in 'ollama list'. Nothing was imported — try again."
+        die "Pull reported success but '$src' isn't showing in 'ollama list'. Nothing was imported - try again."
     fi
 
     green "Pull complete and verified."
@@ -317,7 +299,7 @@ cmd_volume_clean() {
 # ── help ──────────────────────────────────────────────────────────────────
 
 cmd_help() {
-    bold "manage.sh — ollama-ui"
+    bold "manage.sh - ollama-ui"
     echo
     echo "Container"
     echo "  start              Build (if needed) and start"
