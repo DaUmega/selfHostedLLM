@@ -160,7 +160,13 @@ cmd_pull() {
     # Usage: ./manage.sh pull <model>
     [[ $# -ge 1 ]] || die "Usage: ./manage.sh pull <model>\n  e.g. ./manage.sh pull llama3.2"
     is_running || die "Container not running. Run: ./manage.sh start"
-    exec_ollama pull "$1"
+
+    local interrupted=0
+    trap 'interrupted=1' INT TERM
+    docker exec -it "$CONTAINER" ollama pull "$1"
+    trap - INT TERM
+
+    [[ $interrupted -eq 1 ]] && { docker exec "$CONTAINER" pkill -f "ollama pull" >/dev/null 2>&1 || true; die "Cancelled."; }
 }
 
 cmd_remove() {
@@ -172,16 +178,24 @@ cmd_remove() {
 }
 
 cmd_import() {
-    # Import a HuggingFace GGUF model (or any local GGUF) safely.
+    # Import a model — either a HuggingFace/registry ref, or a local GGUF file.
     #
-    # The HF pull approach can fail/corrupt mid-way. Safest method:
-    #   1. Pull the model inside the container (downloads blobs to /root/.ollama/models)
-    #   2. Find the blob, copy + rename to a clean .gguf filename
-    #   3. Create a minimal Modelfile referencing that path
-    #   4. ollama create <name> -f Modelfile
+    # Registry ref (hf.co/... or a normal ollama model ref):
+    #   `ollama pull` does the download itself, including its own resume/
+    #   digest-verification logic. We only ever act on its exit code — if it
+    #   fails or is interrupted (lost connection, Ctrl+C, etc.) we abort and
+    #   import NOTHING. There is no "best effort" partial import: a half
+    #   finished download is not a model.
+    #
+    #   If you want a friendlier local name than the ref, we alias it with
+    #   `ollama cp`, which just points a new name at the same verified
+    #   blobs — no manual blob-hunting involved.
+    #
+    # Local .gguf file:
+    #   You already have the complete file, so we register it directly via
+    #   a minimal Modelfile.
     #
     # Usage:
-    #   ./manage.sh import hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q6_k
     #   ./manage.sh import hf.co/user/repo:tag  [local-name]
     #   ./manage.sh import /path/to/local.gguf  [local-name]
 
@@ -200,7 +214,6 @@ cmd_import() {
         name="${name//[^a-zA-Z0-9._-]/-}"   # sanitize
 
         bold "Importing local GGUF: $src  →  model name: $name"
-        # Copy into container's model store
         local dest="/root/.ollama/imports/${name}.gguf"
         docker exec "$CONTAINER" mkdir -p /root/.ollama/imports
         docker cp "$src" "${CONTAINER}:${dest}"
@@ -209,70 +222,58 @@ cmd_import() {
     fi
 
     # ── Case B: HuggingFace / ollama registry ref ─────────────────────────
-    # Derive a safe local name from the ref if not provided
-    if [[ -z "$name" ]]; then
-        # e.g. hf.co/llmfan46/gemma-4-E4B-it-ultra-uncensored-heretic-GGUF:Q8_0
-        #  → gemma-4-E4B-it-ultra-uncensored-heretic-GGUF-Q8_0
-        name="${src##*/}"           # strip host/user prefix
-        name="${name//:/-}"         # colon → dash
-        name="${name//[^a-zA-Z0-9._-]/-}"
-    fi
-
     bold "Pulling from registry: $src"
-    dim  "(this may take a while depending on model size)"
+    dim  "(Ctrl+C stops the download for real — nothing is imported until it's verified complete)"
 
-    # ── First attempt ─────────────────────────────────────────────────────
-    if docker exec "$CONTAINER" ollama pull "$src"; then
-        bold "Pull succeeded. Locating blob..."
-        local blob
-        blob=$(_find_largest_blob)
-        [[ -n "$blob" ]] || die "Could not find blob after pull."
-        dim "Blob: $blob"
-        local dest="/root/.ollama/imports/${name}.gguf"
-        docker exec "$CONTAINER" mkdir -p /root/.ollama/imports
-        docker exec "$CONTAINER" cp "$blob" "$dest"
+    # IMPORTANT: -it allocates a real TTY so Ctrl+C reaches the remote
+    # process instead of just killing the local docker-exec client.
+    #
+    # We do NOT trust ollama's own exit code to tell us whether Ctrl+C
+    # happened: ollama appears to exit 0 on a cancelled pull (it treats
+    # SIGINT as a clean shutdown, not a failure). So we catch the signal
+    # ourselves — bash is in the same foreground process group as the
+    # terminal and receives the same Ctrl+C — and that flag always wins,
+    # regardless of what ollama reports.
+    local pull_status=0
+    local interrupted=0
+    trap 'interrupted=1' INT TERM
+    docker exec -it "$CONTAINER" ollama pull "$src" || pull_status=$?
+    trap - INT TERM
+
+    if [[ $interrupted -eq 1 ]]; then
+        docker exec "$CONTAINER" pkill -f "ollama pull" >/dev/null 2>&1 || true
+        red "Cancelled."
+        dim  "Nothing was imported — a half-finished download is never registered as a model."
+        die  "Re-run to retry (ollama resumes from where it left off): ./manage.sh import $src${name:+ $name}"
+    fi
+
+    if [[ $pull_status -ne 0 ]]; then
+        red "Pull failed (exit code $pull_status)."
+        dim  "Nothing was imported — a half-finished download is never registered as a model."
+        die  "Re-run to retry (ollama resumes from where it left off): ./manage.sh import $src${name:+ $name}"
+    fi
+
+    # Belt and suspenders: don't take the exit code's word for it. Confirm
+    # the model is actually present in ollama's own registry before we
+    # ever say the word "success".
+    if ! docker exec "$CONTAINER" ollama list | grep -qF "$src"; then
+        die "Pull reported success but '$src' isn't showing in 'ollama list'. Nothing was imported — try again."
+    fi
+
+    green "Pull complete and verified."
+
+    if [[ -n "$name" && "$name" != "$src" ]]; then
+        local alias="${name//[^a-zA-Z0-9._-]/-}"   # sanitize
+        bold "Aliasing to local name: $alias"
+        docker exec "$CONTAINER" ollama cp "$src" "$alias"
         docker exec "$CONTAINER" ollama rm "$src" 2>/dev/null || true
-        _create_from_blob "$dest" "$name"
-        return
+        name="$alias"
+    else
+        name="$src"
     fi
 
-    # ── First attempt failed — use blob rename method ─────────────────────
-    red "Pull failed. Attempting blob rename import..."
-
-    # Whatever was (partially) downloaded, find the largest blob
-    local blob
-    blob=$(_find_largest_blob)
-    if [[ -z "$blob" ]]; then
-        die "No blobs found in /root/.ollama/models/blobs — nothing to recover."
-    fi
-    dim "Found blob: $blob"
-
-    # Rename it in-place to temp.gguf inside the container shell
-    docker exec "$CONTAINER" sh -c "mv '$blob' /root/.ollama/models/blobs/temp.gguf"
-    dim "Renamed → /root/.ollama/models/blobs/temp.gguf"
-
-    # Write Modelfile pointing at the renamed file
-    docker exec "$CONTAINER" sh -c "printf 'FROM /root/.ollama/models/blobs/temp.gguf
-' > /tmp/Modelfile"
-    dim "Modelfile written."
-
-    # Import
-    bold "Running: ollama create $name -f /tmp/Modelfile"
-    docker exec "$CONTAINER" ollama create "$name" -f /tmp/Modelfile         || die "ollama create failed. The blob may be incomplete — try pulling again."
-
-    # Move the now-registered gguf to the imports folder for persistence clarity
-    docker exec "$CONTAINER" mkdir -p /root/.ollama/imports
-    docker exec "$CONTAINER" sh -c "mv /root/.ollama/models/blobs/temp.gguf /root/.ollama/imports/${name}.gguf 2>/dev/null || true"
-    docker exec "$CONTAINER" rm /tmp/Modelfile
-
-    green "Model '$name' imported via blob rename."
+    green "Model '$name' imported successfully."
     dim  "Verify with: ./manage.sh models"
-}
-
-_find_largest_blob() {
-    # Returns the path of the largest sha256-* blob inside the container
-    docker exec "$CONTAINER" sh -c         'find /root/.ollama/models/blobs -type f -name "sha256-*" -printf "%s %p
-" 2>/dev/null          | sort -rn | head -1 | cut -d" " -f2'
 }
 
 _create_from_blob() {
@@ -283,9 +284,6 @@ _create_from_blob() {
 
     # Write a minimal Modelfile inside the container
     docker exec "$CONTAINER" sh -c "printf 'FROM %s\n' '$gguf_path' > /tmp/Modelfile"
-
-    # Optionally add a system prompt skeleton — kept minimal/blank so user can customise
-    # docker exec "$CONTAINER" sh -c "echo 'SYSTEM \"\"' >> /tmp/Modelfile"
 
     docker exec "$CONTAINER" ollama create "$name" -f /tmp/Modelfile
     docker exec "$CONTAINER" rm /tmp/Modelfile
@@ -335,7 +333,7 @@ cmd_help() {
     echo "  pull  <model>      Pull from ollama registry"
     echo "  run   <model>      Interactive CLI chat"
     echo "  remove <model>     Delete a model"
-    echo "  import <ref> [name]   Import HF or local GGUF (safe blob method)"
+    echo "  import <ref> [name]   Import HF/registry ref or local GGUF"
     echo "    e.g.  ./manage.sh import hf.co/user/repo:tag"
     echo "    e.g.  ./manage.sh import ./my-model.gguf my-model"
     echo
