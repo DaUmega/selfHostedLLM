@@ -15,9 +15,11 @@ until ollama list > /dev/null 2>&1; do
 done
 echo "[entrypoint] Ollama ready."
 
-# ── Serve the web UI on port 8080 ─────────────────────────────────────────
-echo "[entrypoint] Serving UI on http://0.0.0.0:8080"
-python3 -m http.server 8080 --directory /app &
+# ── Optional web UI (FRONTEND=1 enables it; default is API only) ──────────
+if [ "${FRONTEND:-0}" = "1" ]; then
+    echo "[entrypoint] Serving UI on http://0.0.0.0:8080"
+    /app/serve &
+fi
 
 # ── Keep container alive; exit if ollama dies ─────────────────────────────
 wait $OLLAMA_PID
