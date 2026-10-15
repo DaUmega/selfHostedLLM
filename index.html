@@ -5,8 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ollama</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
-
+  /* System fonts only: the UI works fully offline, no external requests. */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
@@ -19,8 +18,8 @@
     --user-bg: #1c1c1f;
     --code-bg: #111113;
     --radius: 6px;
-    --font-sans: 'IBM Plex Sans', sans-serif;
-    --font-mono: 'IBM Plex Mono', monospace;
+    --font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
   }
 
   html, body { height: 100%; }
@@ -415,18 +414,6 @@ const API = 'http://localhost:11434';
 let history = [];
 let controller = null;
 let currentModel = '';
-let conversationId = generateConversationId();
-
-function generateConversationId() {
-  return `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}
-
-function logHistoryState(context) {
-  console.log(`[${context}] History length: ${history.length}, Conv ID: ${conversationId}`);
-  if (history.length > 0) {
-    console.log('Messages in context:', history.map(m => `${m.role}(${(m.content || '').substring(0, 30)}...)`).join(' → '));
-  }
-}
 
 function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -562,31 +549,13 @@ function autoResize() {
 
 function clearChat() {
   if (controller) controller.abort();
-  
-  // Completely reset history
-  history.length = 0;  // Alternative clear method as redundant safety
-  history = [];        // Also reset the reference
-  
-  // Generate new conversation ID to ensure isolation
-  conversationId = generateConversationId();
-  
-  // Clean DOM - more thorough cleanup
+  history = [];
   msgsEl.innerHTML = '';
-  if (msgsEl.childNodes.length > 0) {
-    while (msgsEl.firstChild) {
-      msgsEl.removeChild(msgsEl.firstChild);
-    }
-  }
-  
   showEmpty();
   inputEl.value = '';
   inputEl.style.height = 'auto';
   sendBtn.disabled = false;
   stopBtn.classList.remove('visible');
-  
-  logHistoryState('Chat cleared');
-  
-  // Visual feedback that chat was cleared
   setStatus('ready', 'ok');
 }
 
@@ -640,8 +609,6 @@ async function sendMessage() {
   const contentEl = assistantDiv.querySelector('.content');
   scrollBottom();
 
-  logHistoryState('Before API call');
-
   controller = new AbortController();
   let fullText = '';
 
@@ -651,9 +618,6 @@ async function sendMessage() {
       messages: history,
       stream: true
     };
-    
-    console.log(`[${conversationId}] Sending ${history.length} messages to API:`, 
-      history.map(m => `${m.role}: ${(m.content || '').substring(0, 40)}...`));
     
     const res = await fetch(`${API}/api/chat`, {
       method: 'POST',
@@ -686,7 +650,6 @@ async function sendMessage() {
 
     contentEl.innerHTML = renderMarkdown(fullText);
     history.push({ role: 'assistant', content: fullText });
-    logHistoryState('After API response');
 
   } catch(e) {
     if (e.name === 'AbortError') {

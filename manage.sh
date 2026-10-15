@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# offline-ai container manager: ollama + web UI + agentic loop, all in docker
+# offline-ai container manager: ollama + web UI + agentic loop, all in docker.
+# This script only manages the container and the Tor+SSH identity. Everything
+# else (agent, ollama, UI toggle) happens inside, over ssh ai@<onion> via Tor.
 # Usage: ./manage.sh <command> [args]
 set -euo pipefail
 
 IMAGE="offline-ai"
 CONTAINER="offline-ai"
 VOLUME="ollama-models"          # persists /root/.ollama across rebuilds
+IDVOLUME="offline-ai-id"        # persists tor + ssh host keys (stable .onion)
 UI_PORT="${UI_PORT:-8080}"
 API_PORT="${API_PORT:-11434}"
 
 # GPU flag - auto-detected; override with GPU=0 ./manage.sh start
 GPU="${GPU:-auto}"
 
-# Frontend: 1 = serve web UI on :8080, 0 = API only (manage.sh prints curl samples)
+# Frontend: 1 = serve web UI on :8080, 0 = API only (curl samples live in the README)
 FRONTEND="${FRONTEND:-0}"
 
 # Shared folder: host dir mounted at /work inside the container.
@@ -22,17 +25,6 @@ WORKDIR="${WORKDIR:-./work}"
 # Bind address for published ports. 127.0.0.1 = only this machine (and your
 # SSH port-forwards) can reach the API/UI. Set to 0.0.0.0 for LAN access.
 BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
-
-# Agent defaults (overridable per-command, see ./manage.sh agent --help)
-# MODEL: if unset, the agent auto-uses the first installed model.
-MAX_STEPS="${MAX_STEPS:-10}"
-GATE="${GATE:-auto}"             # auto | confirm
-
-resolve_model() {
-    # Explicit MODEL wins; otherwise use the first model in `ollama list`.
-    if [[ -n "${MODEL:-}" ]]; then echo "$MODEL"; return 0; fi
-    docker exec "$CONTAINER" ollama list 2>/dev/null | awk 'NR>1 && NF {print $1; exit}'
-}
 
 # ── helpers ───────────────────────────────────────────────────────────────
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -46,6 +38,11 @@ require() { command -v "$1" &>/dev/null || die "'$1' not found in PATH"; }
 
 is_running() { docker ps -q -f name="^${CONTAINER}$" 2>/dev/null | grep -q .; }
 
+read_onion() {
+    # Print the .onion address, or nothing if the hidden service isn't up yet.
+    docker exec "$CONTAINER" cat /id/tor/hidden/hostname 2>/dev/null || true
+}
+
 gpu_flags() {
     if [[ "$GPU" == "0" ]]; then
         echo ""
@@ -56,12 +53,7 @@ gpu_flags() {
     fi
 }
 
-exec_ollama() {
-    # Run an ollama command inside the container
-    docker exec "$CONTAINER" ollama "$@"
-}
-
-# ── commands ──────────────────────────────────────────────────────────────
+# ── container lifecycle ───────────────────────────────────────────────────
 
 cmd_build() {
     bold "Building image: $IMAGE"
@@ -97,6 +89,7 @@ cmd_start() {
         --restart unless-stopped \
         "${ports[@]}" \
         -v "${VOLUME}:/root/.ollama" \
+        -v "${IDVOLUME}:/id" \
         -v "${workdir_abs}:/work" \
         -e OLLAMA_ORIGINS="*" \
         -e FRONTEND="$FRONTEND" \
@@ -130,15 +123,15 @@ cmd_start() {
     fi
 
     green "Ready."
+    local onion
+    onion="$(read_onion)"
+    [ -n "$onion" ] && dim "  Onion → $onion  (ssh ai@$onion via tor)"
     if [[ "$FRONTEND" == "1" ]]; then
         dim "  UI  → http://localhost:${UI_PORT}"
-        dim "  API → http://localhost:${API_PORT}"
     else
-        dim "  API → http://localhost:${API_PORT}  (frontend disabled)"
-        dim "  Enable the web UI anytime: ./manage.sh ui on"
-        echo
-        _api_samples
+        dim "  Web UI off - start it inside any time: ssh in, then: /app/serve &"
     fi
+    dim "  Next: ./manage.sh auth \"ssh-ed25519 AAAA...\"  then ssh in (see: ./manage.sh share)"
 }
 
 cmd_stop() {
@@ -180,138 +173,78 @@ cmd_status() {
     dim "Shared folder: $WORKDIR → /work"
 }
 
-# ── agent ─────────────────────────────────────────────────────────────────
+# ── tor+ssh identity ──────────────────────────────────────────────────────
 
-cmd_agent() {
-    # Run the agentic loop inside the container (tools sandboxed to /work).
-    # Usage: ./manage.sh agent [--confirm] [--steps N] [--resume] "task..."
-    # Env overrides: MODEL=<name> (default: first installed model) | MAX_STEPS=10 | GATE=auto|confirm
-    is_running || die "Container not running. Run: ./manage.sh start"
-
-    local gate="$GATE" steps="$MAX_STEPS" resume="" task=()
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --confirm) gate="confirm"; shift ;;
-            --steps)   steps="$2"; shift 2 ;;
-            --resume)  resume="--resume"; shift ;;
-            --)        shift; task+=("$@"); break ;;
-            -*)        die "Unknown flag: $1" ;;
-            *)         task+=("$1"); shift ;;
+cmd_auth() {
+    # Authorize an SSH key for the container's ai user.
+    # Usage: ./manage.sh auth "ssh-ed25519 AAAA..." [--restricted]
+    # Default: full shell. --restricted: forwarding-only (web UI), no shell.
+    local restricted=0 key=""
+    for a in "$@"; do
+        case "$a" in
+            --restricted) restricted=1 ;;
+            *) key="$a" ;;
         esac
     done
-    [[ ${#task[@]} -eq 0 && -z "$resume" ]] && die "Usage: ./manage.sh agent [--confirm] [--steps N] [--resume] \"task...\""
-
-    local model
-    model="$(resolve_model)"
-    [[ -n "$model" ]] || die "No models installed. Pull one first, e.g.: ./manage.sh pull llama3.2"
-
-    bold "Agent → model=$model steps=$steps gate=$gate"
-    dim  "  workdir is /work (mounted from ./$WORKDIR on host)"
-    docker exec -it \
-        -e MODEL="$model" \
-        -e MAX_STEPS="$steps" \
-        -e GATE="$gate" \
-        "$CONTAINER" /app/agent $resume "${task[@]}"
-}
-
-# ── api samples ───────────────────────────────────────────────────────────
-
-_api_samples() {
-    local model="${1:-<model>}"
-    local base="http://localhost:${API_PORT}"
-    bold "Sample API usage:"
-    echo
-    dim  "# list models"
-    echo "curl -s $base/api/tags | python3 -c 'import json,sys; [print(m[\"name\"]) for m in json.load(sys.stdin)[\"models\"]]'"
-    echo
-    dim  "# chat (non-streaming)"
-    echo "curl -s $base/api/chat -d '{\"model\":\"$model\",\"stream\":false,"
-    echo "  \"messages\":[{\"role\":\"user\",\"content\":\"write a python hello world\"}]}'"
-    echo
-    dim  "# one-shot generate"
-    echo "curl -s $base/api/generate -d '{\"model\":\"$model\",\"stream\":false,"
-    echo "  \"prompt\":\"Explain what a port scan is in one sentence.\"}'"
-    echo
-    dim  "# streaming chat (newline-delimited JSON)"
-    echo "curl -N $base/api/chat -d '{\"model\":\"$model\","
-    echo "  \"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'"
-}
-
-cmd_api() {
-    is_running || die "Container not running. Run: ./manage.sh start"
-    _api_samples "$(resolve_model 2>/dev/null || true)"
-}
-
-# ── web UI toggle ─────────────────────────────────────────────────────────
-
-ui_running() {
-    docker exec "$CONTAINER" pgrep -f "/app/serve" >/dev/null 2>&1
-}
-
-cmd_ui() {
-    # Toggle the web UI on a running container (runtime only, not sticky).
-    # Usage: ./manage.sh ui [on|off|status]
-    is_running || die "Container not running. Run: ./manage.sh start"
-    case "${1:-status}" in
-        on)
-            if ui_running; then
-                dim "Web UI already on → http://localhost:${UI_PORT}"
-            else
-                docker exec -d "$CONTAINER" /app/serve
-                green "Web UI on → http://localhost:${UI_PORT}"
-            fi
-            ;;
-        off)
-            docker exec "$CONTAINER" pkill -f "/app/serve" >/dev/null 2>&1 || true
-            green "Web UI off."
-            ;;
-        status)
-            ui_running && green "Web UI on → http://localhost:${UI_PORT}" || dim "Web UI off"
-            ;;
-        *) die "Usage: ./manage.sh ui [on|off|status]" ;;
+    [[ -n "$key" ]] || die 'Usage: ./manage.sh auth "ssh-ed25519 AAAA..." [--restricted]'
+    case "$key" in
+        ssh-ed25519*|ssh-rsa*|ecdsa-sha2-*) ;;
+        *) die "That doesn't look like an SSH public key." ;;
     esac
+    is_running || die "Container not running. Run: ./manage.sh start"
+    [ "$restricted" -eq 1 ] && key="restrict,permitopen=\"localhost:8080\",no-pty $key"
+    printf '%s\n' "$key" | docker exec -i "$CONTAINER" bash -c '
+        k=$(cat)
+        f=/home/ai/.ssh/authorized_keys
+        grep -qxF "$k" "$f" 2>/dev/null || echo "$k" >> "$f"
+        chown ai:ai "$f"; chmod 600 "$f"
+    ' || die "Failed to authorize key."
+    if [ "$restricted" -eq 1 ]; then green "Key authorized (forwarding-only: web UI, no shell).";
+    else green "Key authorized (full shell)."; fi
 }
 
-# ── sharing ───────────────────────────────────────────────────────────────
+cmd_onion() {
+    is_running || die "Container not running."
+    local onion
+    onion="$(read_onion)"
+    [ -n "$onion" ] || die "Hidden service not ready yet - check ./manage.sh logs"
+    echo "$onion"
+}
 
 cmd_share() {
-    # Print the copy-paste Tor+SSH one-liner for loved ones (web UI only, no shell).
-    # Their key must be authorized with forwarding-only restrictions (see README).
+    # Print the copy-paste one-liner for loved ones (web UI only, no shell).
+    # Their key must be authorized first: ./manage.sh auth "<pubkey>" --restricted
+    is_running || die "Container not running. Run: ./manage.sh start"
     local onion
-    onion="$(sudo cat /var/lib/tor/ssh_hidden/hostname 2>/dev/null || true)"
-    [ -n "$onion" ] || die "No Tor hidden service on this host. Run: tor-ssh serve"
+    onion="$(read_onion)"
+    [ -n "$onion" ] || die "Hidden service not ready yet - check ./manage.sh logs"
 
-    local user="${SUDO_USER:-$USER}"
-    bold "Send this to your loved ones (web UI only — no shell access):"
+    bold "Send this to your loved ones (web UI only - no shell access):"
     echo
-    echo "  ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" -o ServerAliveInterval=30 -L 8080:localhost:8080 -N ${user}@${onion}"
+    echo "  ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" -o ServerAliveInterval=30 -L 8080:localhost:8080 -N ai@${onion}"
     echo
     dim "  1. They need Tor running locally (Tor Browser also works: use -x 127.0.0.1:9150)"
-    dim "  2. Their key must be added with forwarding-only restrictions (README: Remote access)"
-    dim "  3. They open http://localhost:8080 — first connect takes ~30s (Tor circuit)"
-    if is_running; then
-        if ui_running; then
-            dim "  Web UI is ON."
-        else
-            echo
-            red "  Web UI is currently OFF — run: ./manage.sh ui on"
-        fi
+    dim "  2. Their key must be added first: ./manage.sh auth \"<their-pubkey>\" --restricted"
+    dim "  3. They open http://localhost:8080 - first connect takes ~30s (Tor circuit)"
+    if docker exec "$CONTAINER" pgrep -f "/app/serve" >/dev/null 2>&1; then
+        dim "  Web UI is ON."
     else
         echo
-        red "  Container not running — start it first: ./manage.sh start"
+        red "  Web UI is currently OFF - ssh in and run: /app/serve &"
     fi
     echo
-    dim "Your own full access:"
-    echo "  ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" ${user}@${onion}"
+    dim "Your own full access (agentic CLI + everything):"
+    echo "  ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" ai@${onion}"
+    dim "  then run: agent \"your task\""
 }
 
-# ── doctor ────────────────────────────────────────────────────────────────
+# ── host preflight ────────────────────────────────────────────────────────
 
 cmd_doctor() {
     # Check this machine has what it takes to run offline-ai.
     bold "offline-ai doctor"
     echo
-    local fail=0
+    local fail=0 onion=""
     pass() { green "  [ok] $1"; }
     warn() { red "  [!!] $1"; fail=1; }
     note() { dim  "  [..] $1"; }
@@ -331,149 +264,18 @@ cmd_doctor() {
 
     if docker info 2>/dev/null | grep -q nvidia; then pass "NVIDIA GPU detected"; else note "no NVIDIA GPU (CPU inference only)"; fi
 
-    local onion
-    onion="$(sudo -n cat /var/lib/tor/ssh_hidden/hostname 2>/dev/null || true)"
-    if [ -n "$onion" ]; then pass "Tor hidden service: $onion"; else note "no Tor hidden service (optional; README: Remote access)"; fi
+    onion="$(read_onion)"
+    if [ -n "$onion" ]; then
+        pass "Tor hidden service: $onion"
+    else
+        note "no Tor hidden service (container not running or still starting)"
+    fi
 
     echo
     if [ "$fail" -eq 0 ]; then green "Ready to roll."; else dim "Fix the [!!] items above, then re-run."; fi
 }
 
-# ── models ────────────────────────────────────────────────────────────────
-
-cmd_models() {
-    is_running || die "Container not running. Run: ./manage.sh start"
-    exec_ollama list
-}
-
-cmd_pull() {
-    # Pull a model from the ollama registry
-    # Usage: ./manage.sh pull <model>
-    [[ $# -ge 1 ]] || die "Usage: ./manage.sh pull <model>\n  e.g. ./manage.sh pull llama3.2"
-    is_running || die "Container not running. Run: ./manage.sh start"
-
-    local interrupted=0
-    trap 'interrupted=1' INT TERM
-    docker exec -it "$CONTAINER" ollama pull "$1"
-    trap - INT TERM
-
-    [[ $interrupted -eq 1 ]] && { docker exec "$CONTAINER" pkill -f "ollama pull" >/dev/null 2>&1 || true; die "Cancelled."; }
-}
-
-cmd_remove() {
-    # Remove a model
-    [[ $# -ge 1 ]] || die "Usage: ./manage.sh remove <model>"
-    is_running || die "Container not running."
-    exec_ollama rm "$1"
-    green "Removed $1"
-}
-
-cmd_import() {
-    # Import a model - either a HuggingFace/registry ref, or a local GGUF file.
-    #
-    # Registry ref (hf.co/... or a normal ollama model ref):
-    #   `ollama pull` does the download itself, including its own resume/
-    #   digest-verification logic.
-    #
-    # Local .gguf file:
-    #   You already have the complete file, so we register it directly via
-    #   a minimal Modelfile.
-    #
-    # Usage:
-    #   ./manage.sh import hf.co/user/repo:tag  [local-name]
-    #   ./manage.sh import /path/to/local.gguf  [local-name]
-
-    [[ $# -ge 1 ]] || die "Usage: ./manage.sh import <hf-model-or-gguf-path> [name]"
-    is_running || die "Container not running. Run: ./manage.sh start"
-
-    local src="$1"
-    local name="${2:-}"
-
-    # ── Case A: local .gguf file supplied ─────────────────────────────────
-    if [[ "$src" == *.gguf || -f "$src" ]]; then
-        [[ -f "$src" ]] || die "File not found: $src"
-        local fname
-        fname="$(basename "$src")"
-        name="${name:-${fname%.gguf}}"
-        name="${name//[^a-zA-Z0-9._-]/-}"   # sanitize
-
-        bold "Importing local GGUF: $src  →  model name: $name"
-        local dest="/root/.ollama/imports/${name}.gguf"
-        docker exec "$CONTAINER" mkdir -p /root/.ollama/imports
-        docker cp "$src" "${CONTAINER}:${dest}"
-        _create_from_blob "$dest" "$name"
-        return
-    fi
-
-    # ── Case B: HuggingFace / ollama registry ref ─────────────────────────
-    bold "Pulling from registry: $src"
-    dim  "(Ctrl+C stops the download - can be resumed later with the same command.)"
-
-    local pull_status=0
-    local interrupted=0
-    trap 'interrupted=1' INT TERM
-    docker exec -it "$CONTAINER" ollama pull "$src" || pull_status=$?
-    trap - INT TERM
-
-    if [[ $interrupted -eq 1 ]]; then
-        docker exec "$CONTAINER" pkill -f "ollama pull" >/dev/null 2>&1 || true
-        red "Cancelled."
-        dim  "Nothing was imported - a half-finished download is never registered as a model."
-        die  "Re-run to retry (ollama resumes from where it left off): ./manage.sh import $src${name:+ $name}"
-    fi
-
-    if [[ $pull_status -ne 0 ]]; then
-        red "Pull failed (exit code $pull_status)."
-        dim  "Nothing was imported - a half-finished download is never registered as a model."
-        die  "Re-run to retry (ollama resumes from where it left off): ./manage.sh import $src${name:+ $name}"
-    fi
-
-    # Confirm the model is actually present in ollama's own registry
-    if ! docker exec "$CONTAINER" ollama list | grep -qF "$src"; then
-        die "Pull reported success but '$src' isn't showing in 'ollama list'. Nothing was imported - try again."
-    fi
-
-    green "Pull complete and verified."
-
-    if [[ -n "$name" && "$name" != "$src" ]]; then
-        local alias="${name//[^a-zA-Z0-9._-]/-}"   # sanitize
-        bold "Aliasing to local name: $alias"
-        docker exec "$CONTAINER" ollama cp "$src" "$alias"
-        docker exec "$CONTAINER" ollama rm "$src" 2>/dev/null || true
-        name="$alias"
-    else
-        name="$src"
-    fi
-
-    green "Model '$name' imported successfully."
-    dim  "Verify with: ./manage.sh models"
-}
-
-_create_from_blob() {
-    local gguf_path="$1"
-    local name="$2"
-
-    bold "Creating model '$name' from $gguf_path"
-
-    # Write a minimal Modelfile inside the container
-    docker exec "$CONTAINER" sh -c "printf 'FROM %s\n' '$gguf_path' > /tmp/Modelfile"
-
-    docker exec "$CONTAINER" ollama create "$name" -f /tmp/Modelfile
-    docker exec "$CONTAINER" rm /tmp/Modelfile
-
-    green "Model '$name' imported successfully."
-    dim  "Verify with: ./manage.sh models"
-    dim  "The GGUF lives in the '$VOLUME' volume and persists across rebuilds."
-}
-
-cmd_run() {
-    # Quick interactive chat with a model (CLI)
-    [[ $# -ge 1 ]] || die "Usage: ./manage.sh run <model>"
-    is_running || die "Container not running."
-    docker exec -it "$CONTAINER" ollama run "$1"
-}
-
-# ── Volume management ──────────────────────────────────────────────────────
+# ── volume management ─────────────────────────────────────────────────────
 
 cmd_volume_info() {
     docker volume inspect "$VOLUME" 2>/dev/null || dim "Volume '$VOLUME' does not exist yet."
@@ -490,7 +292,7 @@ cmd_volume_clean() {
 # ── help ──────────────────────────────────────────────────────────────────
 
 cmd_help() {
-    bold "manage.sh - offline-ai (ollama + web UI + agent, all in docker)"
+    bold "manage.sh - offline-ai (container lifecycle + tor+ssh identity)"
     echo
     echo "Container"
     echo "  start              Build (if needed) and start"
@@ -498,50 +300,44 @@ cmd_help() {
     echo "  restart            stop + start"
     echo "  rebuild            stop + build + start"
     echo "  logs               Follow container logs"
-    echo "  shell              Open bash inside container"
+    echo "  shell              Root shell inside (break-glass when ssh is down)"
     echo "  status             Show running state"
     echo
-    echo "Agent  (tools sandboxed to ./work → /work)"
-    echo "  agent [--confirm] [--steps N] [--resume] \"task...\""
-    echo "    e.g. ./manage.sh agent \"list the files in /work and summarize them\""
-    echo "    e.g. ./manage.sh agent --confirm --steps 20 \"refactor main.py\""
-    echo "    e.g. GATE=confirm MAX_STEPS=5 ./manage.sh agent \"write a fuzzer\""
+    echo "Tor+SSH identity"
+    echo "  auth \"<pubkey>\" [--restricted]  Authorize a key (restricted = UI only, no shell)"
+    echo "  onion              Print the .onion address"
+    echo "  share              Print the one-liner for loved ones"
     echo
-    echo "API"
-    echo "  api                Print sample curl usage for the Ollama API"
-    echo "  ui [on|off|status] Toggle the web UI on a running container"
-    echo "  share              Print the Tor+SSH one-liner for loved ones"
+    echo "Inside, over ssh (ssh ai@<onion> via tor) - this is the daily driver:"
+    echo "  agent \"task...\"          Run the agentic loop (tools sandboxed to /work)"
+    echo "    e.g. agent --confirm --steps 20 \"refactor main.py\""
+    echo "    env knobs: MODEL=<name> (default: first installed)  MAX_STEPS=10  GATE=auto|confirm"
+    echo "  ollama pull <model>    Download a model"
+    echo "  ollama list            List installed models"
+    echo "  ollama rm <model>      Delete a model"
+    echo "  ollama run <model>     Interactive CLI chat"
+    echo "  /app/serve &           Start the web UI on :8080  (pkill -f /app/serve to stop)"
     echo
     echo "Machine"
     echo "  doctor             Check this machine can run offline-ai"
-    echo
-    echo "Models"
-    echo "  models             List installed models"
-    echo "  pull  <model>      Pull from ollama registry"
-    echo "  run   <model>      Interactive CLI chat"
-    echo "  remove <model>     Delete a model"
-    echo "  import <ref> [name]   Import HF/registry ref or local GGUF"
-    echo "    e.g.  ./manage.sh import hf.co/unsloth/Qwen3.5-9B-GGUF:Q4_K_M qwen35-9b"
-    echo "    e.g.  ./manage.sh import ./my-model.gguf my-model"
     echo
     echo "Volume (persistent model storage)"
     echo "  volume-info        Inspect the volume"
     echo "  volume-clean       Delete the volume (wipes all models)"
     echo
     echo "Env overrides (prefix the command)"
-    echo "  FRONTEND=0        1 = serve web UI on :8080 (default: API only)"
+    echo "  FRONTEND=0        1 = serve web UI on :8080 at start (default: off)"
     echo "  WORKDIR=./work    host dir shared with the agent at /work"
-    echo "  MODEL=<name>      model the agent uses (default: first installed model)"
-    echo "  MAX_STEPS=10      max unattended agent turns"
-    echo "  GATE=auto         auto | confirm  (confirm asks before every tool call)"
     echo "  GPU=0             disable GPU passthrough"
     echo "  UI_PORT=8080  API_PORT=11434"
     echo "  BIND_ADDR=127.0.0.1   bind published ports (0.0.0.0 = LAN)"
     echo
-    echo "Get rolling (skeleton first, model after):"
+    echo "Get rolling:"
     echo "  ./manage.sh start"
-    echo "  ./manage.sh import hf.co/unsloth/Qwen3.5-9B-GGUF:Q4_K_M qwen35-9b"
-    echo "  ./manage.sh agent \"list the files in /work and summarize them\""
+    echo "  ./manage.sh auth \"ssh-ed25519 AAAA...\"   # your key"
+    echo "  ./manage.sh onion                        # prints the .onion address"
+    echo "  ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" ai@\$(./manage.sh onion)"
+    echo "  # inside:  ollama pull <model>  &&  agent \"your task\""
 }
 
 # ── dispatch ──────────────────────────────────────────────────────────────
@@ -557,16 +353,10 @@ case "$CMD" in
     logs)         cmd_logs         ;;
     shell)        cmd_shell        ;;
     status)       cmd_status       ;;
-    agent)        cmd_agent  "$@"  ;;
-    api)          cmd_api          ;;
-    ui)           cmd_ui     "$@"  ;;
+    auth)         cmd_auth   "$@"  ;;
+    onion)        cmd_onion        ;;
     share)        cmd_share  "$@"  ;;
     doctor)       cmd_doctor       ;;
-    models)       cmd_models       ;;
-    pull)         cmd_pull  "$@"   ;;
-    run)          cmd_run   "$@"   ;;
-    remove)       cmd_remove "$@"  ;;
-    import)       cmd_import "$@"  ;;
     volume-info)  cmd_volume_info  ;;
     volume-clean) cmd_volume_clean ;;
     help|--help|-h) cmd_help       ;;

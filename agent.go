@@ -46,11 +46,8 @@ var (
 	stdin      = bufio.NewReader(os.Stdin)
 )
 
-const systemPrompt = `You are a local coding agent running inside /work. That directory is your ` +
-	`entire world: read, write and run things only there, using relative paths.` + "\n" +
-	`Rules: use tools instead of narrating; be terse. Explore with list_dir/read_file ` +
-	`before changing things. When the task is done, answer with a short summary ` +
-	`and make no further tool calls.`
+const systemPrompt = `You are a local coding agent running inside /work. That directory is your entire world: read, write and run things only there, using relative paths.
+Rules: use tools instead of narrating; be terse. Explore with list_dir/read_file before changing things. When the task is done, answer with a short summary and make no further tool calls.`
 
 func statePath() string { return filepath.Join(workDir, ".agent.json") }
 
@@ -89,6 +86,15 @@ func toInt(v any, def int) int {
 		}
 	}
 	return def
+}
+
+// shortJSON renders v as JSON, truncated to n chars for log lines.
+func shortJSON(v any, n int) string {
+	b, _ := json.Marshal(v)
+	if len(b) > n {
+		return string(b[:n]) + "..."
+	}
+	return string(b)
 }
 
 // ---------- Ollama wire types ----------
@@ -257,11 +263,7 @@ func gated(name string, args map[string]any) string {
 	if gate != "confirm" {
 		return runTool(name, args)
 	}
-	argJSON, _ := json.Marshal(args)
-	if len(argJSON) > 200 {
-		argJSON = argJSON[:200]
-	}
-	fmt.Printf("\n[gate] %s(%s)\nrun? [Y/n/q] ", name, argJSON)
+	fmt.Printf("\n[gate] %s(%s)\nrun? [Y/n/q] ", name, shortJSON(args, 200))
 	line, err := stdin.ReadString('\n')
 	if err != nil {
 		return "denied (no tty for confirmation)"
@@ -411,11 +413,7 @@ func main() {
 		}
 		messages = append(messages, Message{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
 		for _, c := range msg.ToolCalls {
-			argJSON, _ := json.Marshal(c.Function.Arguments)
-			if len(argJSON) > 160 {
-				argJSON = append(argJSON[:160], "..."...)
-			}
-			fmt.Fprintf(os.Stderr, "[step %d] %s(%s)\n", step, c.Function.Name, argJSON)
+			fmt.Fprintf(os.Stderr, "[step %d] %s(%s)\n", step, c.Function.Name, shortJSON(c.Function.Arguments, 160))
 			result := gated(c.Function.Name, c.Function.Arguments)
 			if len(result) > 4000 {
 				result = result[:4000]

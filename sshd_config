@@ -1,0 +1,13 @@
+# offline-ai appliance sshd: key-only, ai user only. No root, no passwords.
+Port 22
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AllowUsers ai
+X11Forwarding no
+AllowTcpForwarding yes
+PermitTunnel no
+HostKey /id/ssh/ssh_host_ed25519_key
+HostKey /id/ssh/ssh_host_rsa_key
+PidFile /run/sshd.pid
