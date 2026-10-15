@@ -49,6 +49,10 @@ gpu_flags() {
     elif docker info 2>/dev/null | grep -q "nvidia"; then
         echo "--gpus all"
     else
+        if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+            echo "note: NVIDIA GPU found on host but not visible to docker." >&2
+            echo "install nvidia-container-toolkit for GPU inference; using CPU for now." >&2
+        fi
         echo ""
     fi
 }
@@ -262,7 +266,13 @@ cmd_doctor() {
     if [ "${mem_gb:-0}" -ge 8 ] 2>/dev/null; then pass "memory: ${mem_gb}GB"; else warn "memory: ${mem_gb:-?}GB (models want 8GB+)"; fi
     if [ "${disk_gb:-0}" -ge 20 ] 2>/dev/null; then pass "disk: ${disk_gb}GB free"; else warn "disk: ${disk_gb:-?}GB free (models are 5GB+)"; fi
 
-    if docker info 2>/dev/null | grep -q nvidia; then pass "NVIDIA GPU detected"; else note "no NVIDIA GPU (CPU inference only)"; fi
+    if docker info 2>/dev/null | grep -q nvidia; then
+        pass "NVIDIA GPU visible to docker"
+    elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+        warn "NVIDIA GPU on host but invisible to docker - install nvidia-container-toolkit"
+    else
+        note "no GPU detected (CPU inference only)"
+    fi
 
     onion="$(read_onion)"
     if [ -n "$onion" ]; then
