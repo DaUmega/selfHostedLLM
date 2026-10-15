@@ -59,7 +59,7 @@ done
 echo "[entrypoint] Ollama ready."
 
 # ── optional web UI ───────────────────────────────────────────────────────
-if [ "${FRONTEND:-0}" = "1" ]; then
+if [ "${FRONTEND:-1}" = "1" ]; then
   echo "[entrypoint] Serving UI on :8080"
   /app/serve &
 fi

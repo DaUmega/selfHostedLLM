@@ -71,18 +71,19 @@ autonomous chains - supervise it, review diffs, keep tasks small.
 
 The web UI is off by default - API only. Enable it at start:
 
-```bash
-FRONTEND=1 ./manage.sh start
-```
-
-Or start it on a running container, anytime - ssh in and run:
+The web UI is on by default. To start without it:
 
 ```bash
-/app/serve &            # pkill -f /app/serve to stop it
+FRONTEND=0 ./manage.sh start
 ```
 
-That only lasts until the container restarts; `FRONTEND=1` sets the initial
-state at start. With the UI off, talk to the API directly:
+Or stop it on a running container, anytime - ssh in and run:
+
+```bash
+pkill -f /app/serve
+```
+
+With the UI off, talk to the API directly:
 
 ```bash
 # list models
@@ -133,7 +134,7 @@ ollama run <model>         # Interactive CLI chat
 
 | Env Var       | Default              | Purpose                                        |
 |---------------|----------------------|------------------------------------------------|
-| `FRONTEND`    | 0                    | 1 = serve the web UI, 0 = API only             |
+| `FRONTEND`    | 1                    | 1 = serve the web UI, 0 = API only             |
 | `BIND_ADDR`   | 127.0.0.1            | Bind published ports (`0.0.0.0` = LAN)         |
 | `WORKDIR`     | ./work               | Host dir shared with agent at /work            |
 | `UI_PORT`     | 8080                 | Web UI port                                    |

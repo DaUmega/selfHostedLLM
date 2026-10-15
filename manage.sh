@@ -16,7 +16,7 @@ API_PORT="${API_PORT:-11434}"
 GPU="${GPU:-auto}"
 
 # Frontend: 1 = serve web UI on :8080, 0 = API only (curl samples live in the README)
-FRONTEND="${FRONTEND:-0}"
+FRONTEND="${FRONTEND:-1}"
 
 # Shared folder: host dir mounted at /work inside the container.
 # Drop files here and the agent can read/edit them.
@@ -336,7 +336,7 @@ cmd_help() {
     echo "  volume-clean       Delete the volume (wipes all models)"
     echo
     echo "Env overrides (prefix the command)"
-    echo "  FRONTEND=0        1 = serve web UI on :8080 at start (default: off)"
+    echo "  FRONTEND=1        0 = API only, no web UI (default: on)"
     echo "  WORKDIR=./work    host dir shared with the agent at /work"
     echo "  GPU=0             disable GPU passthrough"
     echo "  UI_PORT=8080  API_PORT=11434"
