@@ -196,7 +196,7 @@ cmd_auth() {
         *) die "That doesn't look like an SSH public key." ;;
     esac
     is_running || die "Container not running. Run: ./manage.sh start"
-    [ "$restricted" -eq 1 ] && key="restrict,permitopen=\"localhost:8080\",no-pty $key"
+    [ "$restricted" -eq 1 ] && key="restrict,port-forwarding,permitopen=\"localhost:8080\",no-pty $key"
     printf '%s\n' "$key" | docker exec -i "$CONTAINER" bash -c '
         k=$(cat)
         f=/home/ai/.ssh/authorized_keys
@@ -225,8 +225,8 @@ cmd_share() {
 
     bold "Send this to your loved ones (web UI only - no shell access):"
     echo
-    echo "  torsocks ssh -o ServerAliveInterval=30 -L 8080:localhost:8080 -N ai@${onion}"
-    dim "  Have nc? Alternative: ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" -o ServerAliveInterval=30 -L 8080:localhost:8080 -N ai@${onion}"
+    echo "  torsocks ssh -N -L 127.0.0.1:8080:localhost:8080 ai@${onion}"
+    dim "  no torsocks? ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" -N -L 127.0.0.1:8080:localhost:8080 ai@${onion}"
     echo
     dim "  1. They need Tor running locally (Tor Browser also works: use -x 127.0.0.1:9150)"
     dim "  2. Their key must be added first: ./manage.sh auth \"<their-pubkey>\" --restricted"
@@ -326,7 +326,6 @@ cmd_help() {
     echo "    env knobs: MODEL=<name> (default: first installed)  MAX_STEPS=10  GATE=auto|confirm"
     echo "  ollama pull <model>    Download a model"
     echo "  ollama list            List installed models"
-    echo "  ollama rm <model>      Delete a model"
     echo "  ollama run <model>     Interactive CLI chat"
     echo "  /app/serve &           Start the web UI on :8080  (pkill -f /app/serve to stop)"
     echo
@@ -364,7 +363,6 @@ case "$CMD" in
     restart)      cmd_restart      ;;
     rebuild)      cmd_rebuild      ;;
     logs)         cmd_logs         ;;
-    shell)        cmd_shell        ;;
     status)       cmd_status       ;;
     auth)         cmd_auth   "$@"  ;;
     onion)        cmd_onion        ;;
