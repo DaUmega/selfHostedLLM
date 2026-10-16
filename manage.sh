@@ -225,7 +225,8 @@ cmd_share() {
 
     bold "Send this to your loved ones (web UI only - no shell access):"
     echo
-    echo "  ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" -o ServerAliveInterval=30 -L 8080:localhost:8080 -N ai@${onion}"
+    echo "  torsocks ssh -o ServerAliveInterval=30 -L 8080:localhost:8080 -N ai@${onion}"
+    dim "  Have nc? Alternative: ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" -o ServerAliveInterval=30 -L 8080:localhost:8080 -N ai@${onion}"
     echo
     dim "  1. They need Tor running locally (Tor Browser also works: use -x 127.0.0.1:9150)"
     dim "  2. Their key must be added first: ./manage.sh auth \"<their-pubkey>\" --restricted"
@@ -239,6 +240,7 @@ cmd_share() {
     echo
     dim "Your own full access (agentic CLI + everything):"
     echo "  ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" ai@${onion}"
+    dim "  No nc? Use: torsocks ssh ai@${onion}"
     dim "  then run: agent \"your task\""
 }
 
@@ -347,6 +349,7 @@ cmd_help() {
     echo "  ./manage.sh auth \"ssh-ed25519 AAAA...\"   # your key"
     echo "  ./manage.sh onion                        # prints the .onion address"
     echo "  ssh -o \"ProxyCommand=nc -X 5 -x 127.0.0.1:9050 %h %p\" ai@\$(./manage.sh onion)"
+    echo "  # no nc?  torsocks ssh ai@\$(./manage.sh onion)"
     echo "  # inside:  ollama pull <model>  &&  agent \"your task\""
 }
 
